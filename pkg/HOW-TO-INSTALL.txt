@@ -3,29 +3,33 @@ Developed by Pamdai
 ==========================================================
 
 Works on macOS 13 Ventura or later, Apple Silicon and Intel Macs.
+Everything is included — you do NOT need Homebrew, Terminal, or any
+other download.
 
 
-1. OPEN THE INSTALLER
-   Double-click "NTFS-RW-@VERSION@.pkg".
+1. INSTALL
+   Double-click "NTFS-RW-@VERSION@.pkg" and click through the installer.
 
-   This installer is not signed by Apple, so macOS may say it "cannot be
-   opened" or "Apple could not verify" it. To allow it (one time only):
+   The installer is not signed by Apple, so the first time macOS may say
+   it "cannot be opened" or "Apple could not verify" it. To allow it:
      • Click "Done" (do NOT move it to the Bin).
      • Open System Settings -> Privacy & Security.
      • Scroll down and click "Open Anyway" next to NTFS-RW-@VERSION@.pkg,
        then enter your password.
    (macOS 14 and older: right-click the .pkg -> Open -> Open.)
 
-   Follow the installer and click Install.
+
+2. ALLOW FULL DISK ACCESS (once)
+   Open NTFS RW from Applications. Click "Open Settings" in the orange
+   banner and switch on "NTFS RW" in Full Disk Access. If it isn't listed,
+   click "+" and choose NTFS RW from Applications.
 
 
-2. INSTALL THE DRIVERS (once per Mac)
-   Open "NTFS RW" from Applications and click "Install…" in the blue banner.
-   Terminal opens and installs macFUSE and ntfs-3g using Homebrew.
-   No Homebrew? Install it first from https://brew.sh
+3. ALLOW THE macFUSE SYSTEM EXTENSION (once)
+   macOS may show "System Extension Blocked". In NTFS RW click
+   "Show Me How" for step-by-step help.
 
-   Apple Silicon Macs (M1/M2/M3/M4…) must also allow the macFUSE system
-   extension once:
+   Apple Silicon Macs (M1/M2/M3/M4…):
      a. Shut down. Press and hold the power button until "Loading startup
         options" appears, then choose Options -> Continue.
      b. Utilities menu -> Startup Security Utility -> select your disk ->
@@ -33,14 +37,7 @@ Works on macOS 13 Ventura or later, Apple Silicon and Intel Macs.
         management of kernel extensions from identified developers".
      c. Restart. Open System Settings -> Privacy & Security and click
         "Allow" for the macFUSE developer (Benjamin Fleischer). Restart.
-   Intel Macs: just click "Allow" in Privacy & Security if asked.
-
-
-3. ALLOW FULL DISK ACCESS (once per Mac)
-   In NTFS RW, click "Open Settings" in the orange banner, then turn on
-   "NTFS RW" in Full Disk Access. If it isn't listed, click "+" and choose
-   NTFS RW from Applications. macOS blocks access to external disks
-   without this.
+   Intel Macs: just click "Allow" in Privacy & Security, then restart.
 
 
 4. PLUG IN YOUR NTFS DRIVE
@@ -50,5 +47,5 @@ Works on macOS 13 Ventura or later, Apple Silicon and Intel Macs.
 
 TIPS
   • Always Eject the drive before unplugging it.
-  • Terminal commands:  ntfsctl status   |   ntfsctl doctor   |   ntfsctl help
+  • Updating NTFS RW later keeps your permissions — no need to redo 2 or 3.
   • Uninstall: NTFS RW -> Settings -> "Uninstall NTFS RW…"

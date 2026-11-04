@@ -2,13 +2,12 @@
 <h2>NTFS RW is installed</h2>
 <ol>
   <li>Open <b>NTFS RW</b> from Applications.</li>
-  <li>If it asks for macFUSE / ntfs-3g, click <b>Install…</b> and follow the steps in Terminal.</li>
-  <li>When it asks for <b>Full Disk Access</b>, click <b>Open Settings</b> and switch on <b>NTFS RW</b>.
-      macOS blocks access to external disks without it.</li>
+  <li>When it asks for <b>Full Disk Access</b>, click <b>Open Settings</b> and switch on <b>NTFS RW</b>.</li>
+  <li>If macOS says <b>“System Extension Blocked”</b>, click <b>Show Me How</b> in NTFS RW and follow
+      the steps (Apple Silicon: one-time Recovery-mode setting; Intel: click Allow).</li>
   <li>Connect your NTFS drive — it becomes writable automatically.</li>
 </ol>
-<p>Command line: <code>ntfsctl status</code>, <code>sudo ntfsctl mount disk4s1</code>,
-<code>sudo ntfsctl auto off</code>, <code>ntfsctl help</code>.</p>
-<p>To remove: NTFS RW → Settings → Uninstall, or <code>sudo ntfsctl uninstall</code>.</p>
-<p style="color:#666">NTFS RW — developed by <b>Pamdai</b>.</p>
+<p>Command line (optional): <code>ntfsctl status</code>, <code>ntfsctl doctor</code>, <code>ntfsctl help</code>.</p>
+<p>To remove: NTFS RW → Settings → Uninstall.</p>
+<p style="color:#666">NTFS RW — developed by <b>Pamdai</b>. Includes macFUSE and ntfs-3g; see the License page.</p>
 </body></html>

@@ -2,16 +2,54 @@
 <installer-gui-script minSpecVersion="2">
     <title>NTFS RW by Pamdai</title>
     <welcome file="welcome.html" mime-type="text/html"/>
+    <license file="License.txt" mime-type="text/plain"/>
     <conclusion file="conclusion.html" mime-type="text/html"/>
-    <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+    <options customize="never" require-scripts="true" rootVolumeOnly="true" hostArchitectures="arm64,x86_64"/>
     <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
     <volume-check>
         <allowed-os-versions><os-version min="13.0"/></allowed-os-versions>
     </volume-check>
+    <installation-check script="installationCheck()"/>
+    <script><![CDATA[
+        var BUNDLED_MACFUSE = '@MACFUSE_VERSION@';
+
+        function installedMacFUSE() {
+            var b = system.files.bundleAtPath('/Library/Filesystems/macfuse.fs');
+            return b ? (b.CFBundleShortVersionString || '0') : null;
+        }
+
+        // Install the bundled macFUSE only if it is missing or older.
+        function needsMacFUSE() {
+            var v = installedMacFUSE();
+            return v == null || system.compareVersions(v, BUNDLED_MACFUSE) < 0;
+        }
+
+        function installationCheck() {
+            var major = parseInt(system.version.ProductVersion.split('.')[0], 10);
+            if (needsMacFUSE() && major > 27) {
+                my.result.type = 'Fatal';
+                my.result.title = 'Please install the latest macFUSE first';
+                my.result.message = 'This version of macOS is newer than the macFUSE included with NTFS RW supports. ' +
+                    'Install the latest macFUSE from https://macfuse.github.io, then run this installer again.';
+                return false;
+            }
+            return true;
+        }
+    ]]></script>
     <choices-outline>
-        <line choice="default"><line choice="@PKG_ID@"/></line>
+        <line choice="default">
+            <!-- macFUSE first: NTFS RW's postinstall loads its kernel extension. -->
+            <line choice="macfuse"/>
+            <line choice="ntfsrw"/>
+        </line>
     </choices-outline>
     <choice id="default"/>
-    <choice id="@PKG_ID@" visible="false"><pkg-ref id="@PKG_ID@"/></choice>
-    <pkg-ref id="@PKG_ID@" version="@VERSION@" onConclusion="none">@COMPONENT@</pkg-ref>
+    <choice id="macfuse" visible="false" start_selected="needsMacFUSE()">
+        <pkg-ref id="io.macfuse.installer.components.core"/>
+    </choice>
+    <choice id="ntfsrw" visible="false">
+        <pkg-ref id="@PKG_ID@"/>
+    </choice>
+    <pkg-ref id="io.macfuse.installer.components.core" version="@MACFUSE_VERSION@" auth="root" onConclusion="none">macfuse-core.pkg</pkg-ref>
+    <pkg-ref id="@PKG_ID@" version="@VERSION@" auth="root" onConclusion="none">@COMPONENT@</pkg-ref>
 </installer-gui-script>

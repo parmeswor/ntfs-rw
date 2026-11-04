@@ -17,5 +17,12 @@ touch "$TARGET/var/log/ntfsrw.log" && chmod 644 "$TARGET/var/log/ntfsrw.log"
 if [ -z "$TARGET" ]; then
     launchctl enable "system/$LABEL" 2>/dev/null
     launchctl bootstrap system "$PLIST" 2>/dev/null || launchctl kickstart -k "system/$LABEL"
+
+    # Load macFUSE's kernel extension now. If the user hasn't allowed it yet, macOS shows
+    # its "System Extension Blocked" prompt right away; NTFS RW.app explains the steps.
+    LOAD_MACFUSE="/Library/Filesystems/macfuse.fs/Contents/Resources/load_macfuse"
+    if [ -x "$LOAD_MACFUSE" ] && ! kmutil showloaded --list-only 2>/dev/null | grep -q 'io\.macfuse\.filesystems\.macfuse'; then
+        ( "$LOAD_MACFUSE" >/dev/null 2>&1 & )
+    fi
 fi
 exit 0

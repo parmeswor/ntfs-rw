@@ -36,6 +36,9 @@ final class Store: ObservableObject {
     @Published var macfuse = Dependency()
     @Published var ntfs3g = Dependency()
     @Published var daemon = Dependency()
+    @Published var kext = Dependency(installed: true)
+    @Published var appleSilicon = true
+    @Published var showKextHelp = false
     @Published var version = ""
     @Published var busy = false
     @Published var loaded = false
@@ -92,6 +95,8 @@ final class Store: ObservableObject {
                 case "macfuse": macfuse = dep
                 case "ntfs3g": ntfs3g = dep
                 case "daemon": daemon = dep
+                case "kext": kext = dep
+                case "arch": appleSilicon = f[2] == "arm64"
                 default: break
                 }
             case "cfg" where f.count >= 3:
@@ -165,6 +170,12 @@ final class Store: ObservableObject {
         privileged(["config", "set"] + changed.map { "\($0.key)=\($0.value)" }.sorted())
     }
     func startDaemon() { privileged(["daemon", "start"]) }
+
+    /// macFUSE's kernel extension isn't running although an NTFS drive is waiting to be
+    /// made writable — almost always because macOS hasn't been allowed to load it yet.
+    var needsKextApproval: Bool {
+        depsOK && !kext.installed && volumes.contains { $0.state != .rw }
+    }
 
     func installDependencies() {
         // Homebrew must run as the user, interactively, so hand it to Terminal.
@@ -293,6 +304,13 @@ struct ContentView: View {
                        title: "Allow Full Disk Access",
                        message: "macOS blocks access to external disks until NTFS RW is allowed. In the window that opens, turn on NTFS RW (or click + and choose NTFS RW from Applications), then come back here.",
                        action: ("Open Settings", openFullDiskAccessSettings))
+            } else if store.loaded && store.needsKextApproval {
+                Banner(icon: "puzzlepiece.extension.fill", color: .orange,
+                       title: "One more step: allow the macFUSE system extension",
+                       message: store.appleSilicon
+                           ? "Apple Silicon Macs need a one-time setting in Recovery mode before NTFS drives can be written. It takes about 5 minutes."
+                           : "Open Privacy & Security and click Allow next to the macFUSE developer, then restart.",
+                       action: ("Show Me How", { store.showKextHelp = true }))
             } else if store.loaded && !store.daemon.installed {
                 Banner(icon: "exclamationmark.triangle.fill", color: .orange,
                        title: "Auto-mount service is not running",
@@ -361,6 +379,9 @@ struct ContentView: View {
                     .help("Refresh")
             }
             .padding(10)
+        }
+        .sheet(isPresented: $store.showKextHelp) {
+            KextHelpView(appleSilicon: store.appleSilicon) { store.showKextHelp = false }
         }
         .alert(item: $store.repairCandidate) { v in
             Alert(
@@ -465,6 +486,58 @@ struct Banner: View {
     }
 }
 
+struct KextHelpView: View {
+    let appleSilicon: Bool
+    let done: () -> Void
+
+    private var steps: [String] {
+        appleSilicon ? [
+            "Choose Apple menu → Shut Down.",
+            "Press and hold the power button until “Loading startup options” appears. Click Options, then Continue.",
+            "From the Utilities menu choose Startup Security Utility, select your disk and click Security Policy.",
+            "Select “Reduced Security” and tick “Allow user management of kernel extensions from identified developers”. Click OK and restart.",
+            "Open System Settings → Privacy & Security, scroll down and click Allow next to “Benjamin Fleischer” (macFUSE). Restart when asked.",
+            "Connect your NTFS drive — it becomes writable automatically.",
+        ] : [
+            "Open System Settings → Privacy & Security.",
+            "Scroll down and click Allow next to “Benjamin Fleischer” (macFUSE).",
+            "Restart your Mac when asked, then connect your NTFS drive.",
+        ]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Allow the macFUSE system extension", systemImage: "puzzlepiece.extension.fill")
+                .font(.title2.weight(.semibold))
+            Text("NTFS RW writes to NTFS drives through macFUSE, which uses a kernel extension. macOS requires your permission once before it can load.\(appleSilicon ? " On Apple Silicon this setting can only be changed in Recovery mode." : "")")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(Array(steps.enumerated()), id: \.offset) { i, step in
+                    HStack(alignment: .top, spacing: 10) {
+                        Text("\(i + 1)").font(.callout.weight(.bold)).foregroundStyle(.white)
+                            .frame(width: 22, height: 22).background(Circle().fill(Color.accentColor))
+                        Text(step).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            if appleSilicon {
+                Text("Tip: take a photo of these steps with your phone — this window is not available in Recovery mode.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            HStack {
+                Button("Open Privacy & Security") {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security")!)
+                }
+                Spacer()
+                Button("Done", action: done).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
+    }
+}
+
 struct DependencyBanner: View {
     @EnvironmentObject var store: Store
 
@@ -474,53 +547,59 @@ struct DependencyBanner: View {
         VStack(alignment: .leading, spacing: 8) {
             Banner(icon: "shippingbox.fill", color: .blue,
                    title: "Install \(missing.joined(separator: " and "))",
-                   message: "NTFS RW uses the free macFUSE and ntfs-3g drivers. Click Install to set them up with Homebrew in Terminal. On Apple Silicon Macs, macFUSE also needs its system extension allowed once — Terminal will show the steps.",
+                   message: "These drivers are normally included with NTFS RW. Reinstall NTFS RW to restore them, or click Install to set them up with Homebrew in Terminal.",
                    action: ("Install…", store.installDependencies))
         }
     }
 }
 
+/// Editable copy of the settings. A class (rather than @State) so the app builds with
+/// the Command Line Tools alone — their SDK lacks the SwiftUI macro plugin @State needs.
+final class SettingsForm: ObservableObject {
+    @Published var fallback = true
+    @Published var notify = true
+    @Published var openFinder = false
+    @Published var internalDisks = false
+    @Published var mountRoot = "/Volumes"
+    @Published var options = ""
+    @Published var ntfs3gPath = ""
+    @Published var confirmUninstall = false
+}
+
 struct SettingsView: View {
     @EnvironmentObject var store: Store
-    @State private var fallback = true
-    @State private var notify = true
-    @State private var openFinder = false
-    @State private var internalDisks = false
-    @State private var mountRoot = "/Volumes"
-    @State private var options = ""
-    @State private var ntfs3gPath = ""
-    @State private var confirmUninstall = false
+    @StateObject private var form = SettingsForm()
 
     var body: some View {
         Form {
             Section("Behavior") {
-                Toggle("Remount read-only if read/write fails", isOn: $fallback)
-                Toggle("Show notifications", isOn: $notify)
-                Toggle("Open drive in Finder after mounting", isOn: $openFinder)
-                Toggle("Also auto-mount internal disks (Boot Camp)", isOn: $internalDisks)
+                Toggle("Remount read-only if read/write fails", isOn: $form.fallback)
+                Toggle("Show notifications", isOn: $form.notify)
+                Toggle("Open drive in Finder after mounting", isOn: $form.openFinder)
+                Toggle("Also auto-mount internal disks (Boot Camp)", isOn: $form.internalDisks)
             }
             Section("Advanced") {
-                TextField("Mount folder", text: $mountRoot)
-                TextField("ntfs-3g options", text: $options)
-                TextField("ntfs-3g path (empty = auto)", text: $ntfs3gPath)
+                TextField("Mount folder", text: $form.mountRoot)
+                TextField("ntfs-3g options", text: $form.options)
+                TextField("ntfs-3g path (empty = auto)", text: $form.ntfs3gPath)
                 LabeledContent("macFUSE", value: store.macfuse.installed ? store.macfuse.detail : "not installed")
                 LabeledContent("ntfs-3g", value: store.ntfs3g.installed ? store.ntfs3g.detail : "not installed")
             }
             HStack {
-                Button("Uninstall NTFS RW…", role: .destructive) { confirmUninstall = true }
+                Button("Uninstall NTFS RW…", role: .destructive) { form.confirmUninstall = true }
                 Spacer()
                 Text("Developed by Pamdai").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Revert") { load() }
                 Button("Save") {
                     store.saveConfig([
-                        "FALLBACK_READONLY": fallback ? "yes" : "no",
-                        "NOTIFY": notify ? "yes" : "no",
-                        "OPEN_IN_FINDER": openFinder ? "yes" : "no",
-                        "AUTO_MOUNT_INTERNAL": internalDisks ? "yes" : "no",
-                        "MOUNT_ROOT": mountRoot,
-                        "MOUNT_OPTIONS": options,
-                        "NTFS3G_BIN": ntfs3gPath,
+                        "FALLBACK_READONLY": form.fallback ? "yes" : "no",
+                        "NOTIFY": form.notify ? "yes" : "no",
+                        "OPEN_IN_FINDER": form.openFinder ? "yes" : "no",
+                        "AUTO_MOUNT_INTERNAL": form.internalDisks ? "yes" : "no",
+                        "MOUNT_ROOT": form.mountRoot,
+                        "MOUNT_OPTIONS": form.options,
+                        "NTFS3G_BIN": form.ntfs3gPath,
                     ])
                 }
                 .keyboardShortcut(.defaultAction)
@@ -531,21 +610,21 @@ struct SettingsView: View {
         .frame(width: 500)
         .onAppear(perform: load)
         .onChange(of: store.config) { _ in load() }
-        .confirmationDialog("Remove NTFS RW from this Mac?", isPresented: $confirmUninstall) {
+        .confirmationDialog("Remove NTFS RW from this Mac?", isPresented: $form.confirmUninstall) {
             Button("Uninstall", role: .destructive, action: store.uninstall)
         } message: {
-            Text("The app, auto-mount service and settings are removed. macFUSE and ntfs-3g are kept.")
+            Text("The app, auto-mount service and settings are removed. macFUSE is kept for other apps that may use it.")
         }
     }
 
     private func load() {
         let c = store.config
-        fallback = c["FALLBACK_READONLY", default: "yes"] == "yes"
-        notify = c["NOTIFY", default: "yes"] == "yes"
-        openFinder = c["OPEN_IN_FINDER"] == "yes"
-        internalDisks = c["AUTO_MOUNT_INTERNAL"] == "yes"
-        mountRoot = c["MOUNT_ROOT", default: "/Volumes"]
-        options = c["MOUNT_OPTIONS", default: ""]
-        ntfs3gPath = c["NTFS3G_BIN", default: ""]
+        form.fallback = c["FALLBACK_READONLY", default: "yes"] == "yes"
+        form.notify = c["NOTIFY", default: "yes"] == "yes"
+        form.openFinder = c["OPEN_IN_FINDER"] == "yes"
+        form.internalDisks = c["AUTO_MOUNT_INTERNAL"] == "yes"
+        form.mountRoot = c["MOUNT_ROOT", default: "/Volumes"]
+        form.options = c["MOUNT_OPTIONS", default: ""]
+        form.ntfs3gPath = c["NTFS3G_BIN", default: ""]
     }
 }

@@ -7,3 +7,4 @@ dist/*
 !dist/NTFS-RW-1.1.0.zip
 
 .DS_Store
+vendor/

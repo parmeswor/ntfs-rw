@@ -1,0 +1,29 @@
+NTFS RW @VERSION@ — Developed by Pamdai
+https://github.com/parmeswor/ntfs-rw
+
+NTFS RW is free software. This package also installs the following
+third-party software, each under its own license:
+
+1. macFUSE @MACFUSE_VERSION@
+   Copyright (c) 2011-2026 Benjamin Fleischer. All rights reserved.
+   https://macfuse.github.io
+   The official, unmodified macFUSE core component is included. It is
+   installed only if this Mac does not already have macFUSE
+   @MACFUSE_VERSION@ or newer. macFUSE's license is reproduced below and is
+   installed at:
+     /Library/Application Support/NTFSRW/licenses/macFUSE-License.rtf
+   macFUSE is distributed here as part of free, non-commercial software.
+
+2. ntfs-3g @NTFS3G_VERSION@ (ntfs-3g and ntfsfix)
+   Copyright (c) Tuxera Inc. and the NTFS-3G contributors.
+   https://github.com/tuxera/ntfs-3g
+   Licensed under the GNU General Public License, version 2. Built from the
+   unmodified upstream source. The complete corresponding source code and
+   the license text are installed at:
+     /Library/Application Support/NTFSRW/licenses/ntfs-3g-@NTFS3G_VERSION@.tar.gz
+     /Library/Application Support/NTFSRW/licenses/ntfs-3g-COPYING.txt
+   and are also attached to each release at
+     https://github.com/parmeswor/ntfs-rw/releases
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND. Always keep
+backups of important data and eject NTFS drives before unplugging them.

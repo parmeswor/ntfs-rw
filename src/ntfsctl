@@ -17,6 +17,8 @@ STATE_DIR="/var/run/ntfsrw"
 QUEUE_DIR="$SUPPORT_DIR/queue"      # launchd QueueDirectories: requests for the helper
 RESULT_DIR="$STATE_DIR/results"
 SYS_TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+BUNDLED_BIN="$SUPPORT_DIR/bin"      # ntfs-3g + ntfsfix shipped with the package
+LOAD_MACFUSE="/Library/Filesystems/macfuse.fs/Contents/Resources/load_macfuse"
 PKG_ID="com.ntfsrw.pkg"
 SELF="/usr/local/bin/ntfsctl"
 
@@ -144,7 +146,7 @@ normalize_dev() { # accepts disk4s1 or /dev/disk4s1
 find_ntfs3g() {
     if [ -n "$NTFS3G_BIN" ] && [ -x "$NTFS3G_BIN" ]; then echo "$NTFS3G_BIN"; return 0; fi
     local p
-    for p in /opt/homebrew/bin/ntfs-3g /opt/homebrew/sbin/ntfs-3g \
+    for p in "$BUNDLED_BIN/ntfs-3g" /opt/homebrew/bin/ntfs-3g /opt/homebrew/sbin/ntfs-3g \
              /usr/local/bin/ntfs-3g /usr/local/sbin/ntfs-3g \
              /opt/local/bin/ntfs-3g /usr/local/opt/ntfs-3g-mac/bin/ntfs-3g; do
         [ -x "$p" ] && { echo "$p"; return 0; }
@@ -159,6 +161,10 @@ find_ntfsfix() {
         [ -x "$p" ] && { echo "$p"; return 0; }
     done
     return 1
+}
+
+kext_loaded() {
+    kmutil showloaded --list-only 2>/dev/null | grep -q 'io\.macfuse\.filesystems\.macfuse'
 }
 
 macfuse_version() {
@@ -478,6 +484,8 @@ cmd_status() {
         printf 'meta\tversion\t%s\n' "$VERSION"
         if v="$(macfuse_version)"; then printf 'dep\tmacfuse\tyes\t%s\n' "$v"; else printf 'dep\tmacfuse\tno\t\n'; fi
         if ntfs3g="$(find_ntfs3g)"; then printf 'dep\tntfs3g\tyes\t%s\n' "$ntfs3g"; else printf 'dep\tntfs3g\tno\t\n'; fi
+        if kext_loaded; then printf 'dep\tkext\tyes\t\n'; else printf 'dep\tkext\tno\t\n'; fi
+        printf 'dep\tarch\t%s\t\n' "$(uname -m)"
         if daemon_loaded; then printf 'dep\tdaemon\tyes\t\n'; else printf 'dep\tdaemon\tno\t\n'; fi
         printf 'dep\tfda\t%s\t\n' "$(helper_fda)"
         for key in $CONFIG_KEYS; do eval "printf 'cfg\t%s\t%s\n' \"\$key\" \"\$$key\""; done
@@ -497,7 +505,7 @@ cmd_doctor() {
     if v="$(macfuse_version)"; then
         echo "  [ok]   macFUSE $v"
         if [ "$(uname -m)" = arm64 ]; then
-            if kmutil showloaded --list-only 2>/dev/null | grep -qi macfuse; then
+            if kext_loaded; then
                 echo "  [ok]   macFUSE kernel extension is loaded"
             else
                 echo "  [info] macFUSE kernel extension is not loaded yet (it loads on first mount)."
@@ -512,7 +520,10 @@ cmd_doctor() {
         ok=0; echo "  [MISSING] macFUSE            -> run: ntfsctl install-deps"
     fi
     if ntfs3g="$(find_ntfs3g)"; then
-        echo "  [ok]   ntfs-3g at $ntfs3g"
+        case "$ntfs3g" in
+            "$BUNDLED_BIN"/*) echo "  [ok]   ntfs-3g (bundled with NTFS RW)" ;;
+            *)                echo "  [ok]   ntfs-3g at $ntfs3g" ;;
+        esac
     else
         ok=0; echo "  [MISSING] ntfs-3g            -> run: ntfsctl install-deps"
     fi
@@ -617,8 +628,15 @@ cmd_automount() {
     process_queue
     [ "$AUTO_MOUNT" = yes ] || exit 0
     find_ntfs3g >/dev/null && macfuse_version >/dev/null || exit 0
-    local dev id
-    for dev in $(ntfs_devices); do
+    local dev id devs
+    devs="$(ntfs_devices)"
+    [ -n "$devs" ] || exit 0
+    # Load macFUSE's kernel extension up front. If the user hasn't allowed it yet this
+    # makes macOS show its "System Extension Blocked" prompt, which guides them.
+    if ! kext_loaded && [ -x "$LOAD_MACFUSE" ]; then
+        "$LOAD_MACFUSE" >/dev/null 2>&1 || echo "$(ts) macFUSE kernel extension not allowed yet"
+    fi
+    for dev in $devs; do
         load_info "$dev"
         id="$(volume_id "$dev")"
         is_excluded "$id" && continue
@@ -727,6 +745,11 @@ find_brew() {
 }
 
 cmd_install_deps() {
+    if [ -x "$BUNDLED_BIN/ntfs-3g" ] && macfuse_version >/dev/null; then
+        echo "macFUSE and ntfs-3g are included with NTFS RW — nothing to install."
+        cmd_doctor || true
+        return 0
+    fi
     [ "$(id -u)" != 0 ] || die "run 'ntfsctl install-deps' WITHOUT sudo (Homebrew refuses to run as root)."
     local brew
     brew="$(find_brew)" || {
@@ -772,7 +795,8 @@ cmd_uninstall() {
     pkgutil --forget "$PKG_ID" >/dev/null 2>&1 || true
     rm -f "$SELF"
     echo "NTFS RW has been removed. Volumes already mounted stay mounted until ejected."
-    echo "To also remove the dependencies: brew uninstall ntfs-3g-mac && brew uninstall --cask macfuse"
+    echo "macFUSE is kept because other apps may use it. To remove it, open:"
+    echo "  /Library/Filesystems/macfuse.fs/Contents/Resources/uninstall_macfuse.app"
 }
 
 cmd_log() {

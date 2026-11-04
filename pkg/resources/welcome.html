@@ -1,22 +1,22 @@
 <html><body style="font-family:-apple-system,Helvetica;font-size:13px;line-height:1.45">
 <h2>NTFS RW</h2>
 <p style="color:#666;margin-top:-8px">Developed by <b>Pamdai</b></p>
-<p>Read <b>and write</b> Windows (NTFS) drives on your Mac.</p>
+<p>Read <b>and write</b> Windows (NTFS) drives on your Mac. Everything needed is included —
+no Homebrew, no Terminal, no extra downloads.</p>
 <p>This installs:</p>
 <ul>
   <li><b>NTFS RW.app</b> in Applications — see your NTFS drives, make them writable, change settings.</li>
-  <li><b>Auto-mount service</b> — when you plug in an NTFS drive it is switched to read/write automatically.</li>
-  <li><b>ntfsctl</b> command-line tool in <code>/usr/local/bin</code>.</li>
+  <li><b>Auto-mount service</b> — NTFS drives become writable automatically when you plug them in.</li>
+  <li><b>macFUSE</b> (official, unmodified) — only if your Mac doesn't already have it.</li>
+  <li><b>ntfs-3g</b> — the open-source NTFS driver.</li>
 </ul>
-<h3>Requirements</h3>
-<p>NTFS RW uses the free <b>macFUSE</b> and <b>ntfs-3g</b> drivers. If they are not installed yet,
-open NTFS RW after installation and click <b>Install…</b> (uses <a href="https://brew.sh">Homebrew</a>),
-or run <code>ntfsctl install-deps</code> in Terminal.</p>
-<p><b>Apple Silicon:</b> macFUSE needs its system extension allowed once
-(Recovery&nbsp;→ Startup Security Utility&nbsp;→ Reduced Security, then approve it in
-System Settings&nbsp;→ Privacy &amp; Security).</p>
-<p><b>Full Disk Access:</b> macOS only lets apps access external disks directly with Full Disk Access.
-NTFS RW will guide you to switch it on for <b>NTFS RW</b> in System Settings&nbsp;→ Privacy &amp; Security.</p>
+<h3>After installing — two one-time permissions</h3>
+<ol>
+  <li><b>Full Disk Access</b> for NTFS RW, so macOS lets it use external disks.</li>
+  <li><b>Allow the macFUSE system extension.</b> On Apple Silicon Macs this needs a setting
+      in Recovery mode (about 5 minutes). Intel Macs just click <i>Allow</i>.</li>
+</ol>
+<p>NTFS RW shows you each step when it's needed.</p>
 <p style="color:#a00"><b>Important:</b> always <i>Eject</i> NTFS drives before unplugging, and fully shut down
 Windows (disable Fast Startup) before connecting a drive that Windows used.</p>
 </body></html>
