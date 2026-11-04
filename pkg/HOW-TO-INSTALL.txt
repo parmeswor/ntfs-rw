@@ -1,0 +1,54 @@
+NTFS RW  —  Read & write NTFS (Windows) drives on your Mac
+Developed by Pamdai
+==========================================================
+
+Works on macOS 13 Ventura or later, Apple Silicon and Intel Macs.
+
+
+1. OPEN THE INSTALLER
+   Double-click "NTFS-RW-@VERSION@.pkg".
+
+   This installer is not signed by Apple, so macOS may say it "cannot be
+   opened" or "Apple could not verify" it. To allow it (one time only):
+     • Click "Done" (do NOT move it to the Bin).
+     • Open System Settings -> Privacy & Security.
+     • Scroll down and click "Open Anyway" next to NTFS-RW-@VERSION@.pkg,
+       then enter your password.
+   (macOS 14 and older: right-click the .pkg -> Open -> Open.)
+
+   Follow the installer and click Install.
+
+
+2. INSTALL THE DRIVERS (once per Mac)
+   Open "NTFS RW" from Applications and click "Install…" in the blue banner.
+   Terminal opens and installs macFUSE and ntfs-3g using Homebrew.
+   No Homebrew? Install it first from https://brew.sh
+
+   Apple Silicon Macs (M1/M2/M3/M4…) must also allow the macFUSE system
+   extension once:
+     a. Shut down. Press and hold the power button until "Loading startup
+        options" appears, then choose Options -> Continue.
+     b. Utilities menu -> Startup Security Utility -> select your disk ->
+        Security Policy -> "Reduced Security" and tick "Allow user
+        management of kernel extensions from identified developers".
+     c. Restart. Open System Settings -> Privacy & Security and click
+        "Allow" for the macFUSE developer (Benjamin Fleischer). Restart.
+   Intel Macs: just click "Allow" in Privacy & Security if asked.
+
+
+3. ALLOW FULL DISK ACCESS (once per Mac)
+   In NTFS RW, click "Open Settings" in the orange banner, then turn on
+   "NTFS RW" in Full Disk Access. If it isn't listed, click "+" and choose
+   NTFS RW from Applications. macOS blocks access to external disks
+   without this.
+
+
+4. PLUG IN YOUR NTFS DRIVE
+   It becomes writable automatically and you'll see a notification.
+   Or click "Make Writable" in the NTFS RW window.
+
+
+TIPS
+  • Always Eject the drive before unplugging it.
+  • Terminal commands:  ntfsctl status   |   ntfsctl doctor   |   ntfsctl help
+  • Uninstall: NTFS RW -> Settings -> "Uninstall NTFS RW…"

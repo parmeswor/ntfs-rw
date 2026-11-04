@@ -1,0 +1,835 @@
+#!/bin/bash
+#
+# ntfsctl - mount NTFS volumes read/write on macOS using macFUSE + ntfs-3g.
+#
+# Part of the "NTFS RW" package. Runs on the stock macOS bash (3.2).
+#
+set -u
+
+VERSION="@VERSION@"
+LABEL="com.ntfsrw.automount"
+SUPPORT_DIR="/Library/Application Support/NTFSRW"
+CONFIG_FILE="$SUPPORT_DIR/ntfsrw.conf"
+DAEMON_PLIST="/Library/LaunchDaemons/$LABEL.plist"
+APP_PATH="/Applications/NTFS RW.app"
+LOG_FILE="/var/log/ntfsrw.log"
+STATE_DIR="/var/run/ntfsrw"
+QUEUE_DIR="$SUPPORT_DIR/queue"      # launchd QueueDirectories: requests for the helper
+RESULT_DIR="$STATE_DIR/results"
+SYS_TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+PKG_ID="com.ntfsrw.pkg"
+SELF="/usr/local/bin/ntfsctl"
+
+# launchd and `do shell script` give us a minimal PATH; Homebrew lives elsewhere.
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin"
+
+# ---------------------------------------------------------------- config ----
+
+CONFIG_KEYS="AUTO_MOUNT AUTO_MOUNT_INTERNAL FALLBACK_READONLY NOTIFY OPEN_IN_FINDER MOUNT_ROOT MOUNT_OPTIONS EXCLUDE NTFS3G_BIN"
+
+set_defaults() {
+    AUTO_MOUNT="yes"
+    AUTO_MOUNT_INTERNAL="no"
+    FALLBACK_READONLY="yes"
+    NOTIFY="yes"
+    OPEN_IN_FINDER="no"
+    MOUNT_ROOT="/Volumes"
+    MOUNT_OPTIONS="local,allow_other,auto_xattr,auto_cache,windows_names"
+    EXCLUDE=""
+    NTFS3G_BIN=""
+}
+
+is_config_key() {
+    case " $CONFIG_KEYS " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+# Parse KEY=value lines without sourcing (the file is read by root).
+load_config() {
+    set_defaults
+    [ -r "$CONFIG_FILE" ] || return 0
+    local line key val
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*) continue ;; esac
+        key="${line%%=*}"
+        val="${line#*=}"
+        key="$(printf '%s' "$key" | tr -d '[:space:]')"
+        is_config_key "$key" || continue
+        # strip one level of surrounding quotes
+        case "$val" in
+            \"*\") val="${val#\"}"; val="${val%\"}" ;;
+            \'*\') val="${val#\'}"; val="${val%\'}" ;;
+        esac
+        eval "$key=\$val"
+    done < "$CONFIG_FILE"
+}
+
+validate_value() { # key value
+    local key="$1" val="$2"
+    case "$val" in *'"'*|*"'"*|*'\'*|*'`'*|*'$'*) die "Invalid characters in value for $key" ;; esac
+    case "$val" in *"
+"*) die "Newlines are not allowed in $key" ;; esac
+    case "$key" in
+        AUTO_MOUNT|AUTO_MOUNT_INTERNAL|FALLBACK_READONLY|NOTIFY|OPEN_IN_FINDER)
+            case "$val" in yes|no) ;; *) die "$key must be 'yes' or 'no'" ;; esac ;;
+        MOUNT_ROOT)
+            case "$val" in /*) ;; *) die "MOUNT_ROOT must be an absolute path" ;; esac ;;
+        NTFS3G_BIN)
+            [ -z "$val" ] || [ -x "$val" ] || die "NTFS3G_BIN '$val' is not an executable" ;;
+    esac
+}
+
+write_config() {
+    local tmp
+    tmp="$(mktemp "$SUPPORT_DIR/.ntfsrw.conf.XXXXXX")" || die "Cannot write to $SUPPORT_DIR"
+    {
+        echo "# NTFS RW configuration. Edit with: sudo ntfsctl config set KEY=VALUE"
+        echo "# or use the NTFS RW app. See: ntfsctl help"
+        echo
+        echo "# Automatically remount NTFS volumes read/write when they are attached."
+        echo "AUTO_MOUNT=\"$AUTO_MOUNT\""
+        echo "# Also auto-mount NTFS partitions on internal disks (e.g. Boot Camp). Risky if Windows hibernates."
+        echo "AUTO_MOUNT_INTERNAL=\"$AUTO_MOUNT_INTERNAL\""
+        echo "# If read/write mounting fails (e.g. Windows hibernated), remount read-only."
+        echo "FALLBACK_READONLY=\"$FALLBACK_READONLY\""
+        echo "# Show a macOS notification when a volume is mounted or fails to mount."
+        echo "NOTIFY=\"$NOTIFY\""
+        echo "# Open the volume in Finder after it is mounted read/write."
+        echo "OPEN_IN_FINDER=\"$OPEN_IN_FINDER\""
+        echo "# Directory in which mount points are created."
+        echo "MOUNT_ROOT=\"$MOUNT_ROOT\""
+        echo "# Comma-separated options passed to ntfs-3g (-o)."
+        echo "MOUNT_OPTIONS=\"$MOUNT_OPTIONS\""
+        echo "# Comma-separated volume IDs (see 'ntfsctl list') that are never auto-mounted."
+        echo "EXCLUDE=\"$EXCLUDE\""
+        echo "# Path to ntfs-3g. Empty = auto-detect."
+        echo "NTFS3G_BIN=\"$NTFS3G_BIN\""
+    } > "$tmp"
+    chmod 644 "$tmp"
+    chown root:wheel "$tmp" 2>/dev/null
+    mv -f "$tmp" "$CONFIG_FILE"
+}
+
+# --------------------------------------------------------------- helpers ----
+
+DAEMON_MODE=0
+
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+
+log() {
+    if [ "$DAEMON_MODE" = 1 ]; then
+        echo "$(ts) $*"
+    else
+        echo "$*" >&2
+        if [ "$(id -u)" = 0 ]; then echo "$(ts) [cli] $*" >> "$LOG_FILE" 2>/dev/null; fi
+    fi
+}
+
+die() { echo "ntfsctl: $*" >&2; exit 1; }
+
+require_root() {
+    [ "$(id -u)" = 0 ] || die "this command needs administrator rights. Run: sudo ntfsctl $*"
+}
+
+valid_dev() {
+    printf '%s' "$1" | grep -Eq '^disk[0-9]+(s[0-9]+)?$'
+}
+
+normalize_dev() { # accepts disk4s1 or /dev/disk4s1
+    local d="${1#/dev/}"
+    valid_dev "$d" || die "'$1' is not a valid disk identifier (expected e.g. disk4s1)"
+    printf '%s' "$d"
+}
+
+find_ntfs3g() {
+    if [ -n "$NTFS3G_BIN" ] && [ -x "$NTFS3G_BIN" ]; then echo "$NTFS3G_BIN"; return 0; fi
+    local p
+    for p in /opt/homebrew/bin/ntfs-3g /opt/homebrew/sbin/ntfs-3g \
+             /usr/local/bin/ntfs-3g /usr/local/sbin/ntfs-3g \
+             /opt/local/bin/ntfs-3g /usr/local/opt/ntfs-3g-mac/bin/ntfs-3g; do
+        [ -x "$p" ] && { echo "$p"; return 0; }
+    done
+    return 1
+}
+
+find_ntfsfix() {
+    local p n3g
+    n3g="$(find_ntfs3g)" && [ -x "$(dirname "$n3g")/ntfsfix" ] && { echo "$(dirname "$n3g")/ntfsfix"; return 0; }
+    for p in /opt/homebrew/bin/ntfsfix /opt/homebrew/sbin/ntfsfix /usr/local/bin/ntfsfix /usr/local/sbin/ntfsfix; do
+        [ -x "$p" ] && { echo "$p"; return 0; }
+    done
+    return 1
+}
+
+macfuse_version() {
+    local plist="/Library/Filesystems/macfuse.fs/Contents/Info.plist"
+    [ -f "$plist" ] || return 1
+    plutil -extract CFBundleShortVersionString raw -o - "$plist" 2>/dev/null || echo "unknown"
+}
+
+daemon_loaded() {
+    launchctl print "system/$LABEL" >/dev/null 2>&1
+}
+
+console_uid() {
+    local u
+    u="$(stat -f %u /dev/console 2>/dev/null)"
+    [ -n "$u" ] && [ "$u" != 0 ] && echo "$u"
+}
+
+as_console_user() { # cmd...
+    local uid
+    uid="$(console_uid)" || return 1
+    if [ "$(id -u)" = 0 ]; then
+        launchctl asuser "$uid" sudo -u "#$uid" "$@"
+    else
+        "$@"
+    fi
+}
+
+notify() { # message
+    [ "$NOTIFY" = yes ] || return 0
+    as_console_user /usr/bin/osascript \
+        -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' \
+        "NTFS RW" "$1" >/dev/null 2>&1 &
+}
+
+# ------------------------------------------------- Full Disk Access / queue ----
+#
+# macOS refuses raw access to external disks (/dev/diskN) unless the responsible
+# process has Full Disk Access -- even for root. The launchd job runs NTFS RW.app
+# in helper mode, so granting Full Disk Access to "NTFS RW" covers it. Commands
+# that touch the raw device (mount, repair) are forwarded to that job.
+
+# True if this process can read an FDA-protected file (only meaningful as root).
+have_fda() { head -c 1 "$SYS_TCC_DB" >/dev/null 2>&1; }
+
+# Last result recorded by the helper: yes / no / unknown.
+helper_fda() { cat "$STATE_DIR/fda" 2>/dev/null || echo unknown; }
+
+open_fda_settings() {
+    as_console_user /usr/bin/open "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles" >/dev/null 2>&1
+}
+
+# Forward "<op> <dev>" to the helper and wait for its result.
+# Returns 1 if forwarding isn't possible (we are the helper, or it isn't running).
+VIA_RC=0
+via_helper() {
+    [ -z "${NTFSRW_HELPER:-}" ] || return 1
+    [ -d "$QUEUE_DIR" ] && daemon_loaded || return 1
+    local id="$(date +%s)-$$-$RANDOM" i
+    mkdir -p "$RESULT_DIR"
+    printf '%s %s\n' "$1" "$2" > "$STATE_DIR/$id.tmp"
+    mv "$STATE_DIR/$id.tmp" "$QUEUE_DIR/$id.req"
+    for i in $(seq 1 180); do
+        if [ -f "$RESULT_DIR/$id.rc" ]; then
+            cat "$RESULT_DIR/$id.out" >&2
+            VIA_RC="$(cat "$RESULT_DIR/$id.rc")"
+            rm -f "$RESULT_DIR/$id.out" "$RESULT_DIR/$id.rc"
+            return 0
+        fi
+        sleep 0.5
+    done
+    rm -f "$QUEUE_DIR/$id.req"
+    die "the NTFS RW service did not respond within 90s. Check: ntfsctl doctor"
+}
+
+# Run queued requests (called by the helper job).
+process_queue() {
+    local f id op dev
+    [ -d "$QUEUE_DIR" ] || return 0
+    mkdir -p "$RESULT_DIR"
+    for f in "$QUEUE_DIR"/*; do
+        [ -e "$f" ] || continue
+        id="$(basename "$f")"
+        op=""; dev=""
+        read -r op dev < "$f" 2>/dev/null
+        rm -f "$f"
+        case "$id" in *.req) id="${id%.req}" ;; *) continue ;; esac
+        printf '%s' "$id" | grep -Eq '^[0-9]+-[0-9]+-[0-9]+$' || continue
+        if ! valid_dev "$dev"; then
+            echo "invalid request" > "$RESULT_DIR/$id.out"; echo 2 > "$RESULT_DIR/$id.rc"; continue
+        fi
+        case "$op" in
+            mount|repair) set -- "$op" "$dev" ;;
+            repair-dry)   set -- repair --dry-run "$dev" ;;
+            *) echo "invalid request" > "$RESULT_DIR/$id.out"; echo 2 > "$RESULT_DIR/$id.rc"; continue ;;
+        esac
+        echo "$(ts) request: $*"
+        NTFSRW_HELPER=1 /bin/bash "$SELF" "$@" > "$RESULT_DIR/$id.out" 2>&1
+        echo $? > "$RESULT_DIR/$id.rc.tmp"
+        mv "$RESULT_DIR/$id.rc.tmp" "$RESULT_DIR/$id.rc"
+    done
+}
+
+# ------------------------------------------------------- volume discovery ----
+
+# Created up front so subshells (pipelines) share the same file.
+INFO_TMP="$(mktemp -t ntfsrw)" || exit 1
+trap 'rm -f "$INFO_TMP"' EXIT
+
+# Load `diskutil info` for a device into INFO_TMP.
+load_info() {
+    diskutil info -plist "$1" > "$INFO_TMP" 2>/dev/null
+}
+info() { plutil -extract "$1" raw -o - "$INFO_TMP" 2>/dev/null; }
+
+# All partitions whose filesystem is NTFS.
+ntfs_devices() {
+    local dev
+    diskutil list 2>/dev/null \
+        | awk '/Windows_NTFS|Microsoft Basic Data/ {print $NF}' \
+        | while read -r dev; do
+            valid_dev "$dev" || continue
+            load_info "$dev" || continue
+            [ "$(info FilesystemType)" = "ntfs" ] && echo "$dev"
+        done
+}
+
+# Stable identifier used for EXCLUDE: volume UUID, else partition UUID, else device.
+volume_id() {
+    local id
+    id="$(info VolumeUUID)"; [ -n "$id" ] || id="$(info DiskUUID)"; [ -n "$id" ] || id="$1"
+    echo "$id"
+}
+
+volume_name() {
+    local n
+    n="$(info VolumeName)"
+    [ -n "$n" ] || n="NTFS $1"
+    # mount-point and option safe
+    printf '%s' "$n" | tr '/,:\t' '--- '
+}
+
+is_excluded() { # id
+    case ",$EXCLUDE," in *",$1,"*) return 0 ;; esac
+    return 1
+}
+
+# Echo "TYPE<TAB>MOUNTPOINT" for a device, or nothing if not mounted.
+mount_entry() {
+    local dev="$1" line mp
+    line="$(mount | grep -E "^/dev/$dev on " | head -n1)"
+    if [ -z "$line" ] && [ -f "$STATE_DIR/$dev" ]; then
+        mp="$(cat "$STATE_DIR/$dev")"
+        line="$(mount | grep -F " on $mp (" | head -n1)"
+    fi
+    [ -n "$line" ] || return 1
+    printf '%s\n' "$line" | sed -E 's|^[^ ]+ on (.*) \(([^,)]+)[,)].*$|\2	\1|'
+}
+
+# rw = mounted by ntfs-3g, ro = mounted natively (read-only), none = not mounted
+volume_state() {
+    local entry type
+    entry="$(mount_entry "$1")" || { echo none; return; }
+    type="${entry%%	*}"
+    case "$type" in
+        *fuse*) echo rw ;;
+        *) if [ -f "$STATE_DIR/$1" ] && [ "$type" != ntfs ]; then echo rw; else echo ro; fi ;;
+    esac
+}
+
+volume_mountpoint() {
+    local entry
+    entry="$(mount_entry "$1")" || return 1
+    echo "${entry#*	}"
+}
+
+human_size() {
+    awk -v b="${1:-0}" 'BEGIN { split("B KB MB GB TB PB", u, " "); i = 1;
+        while (b >= 1000 && i < 6) { b /= 1000; i++ } printf (i == 1 ? "%d %s" : "%.1f %s"), b, u[i] }'
+}
+
+# ------------------------------------------------------- mount / unmount ----
+
+failed_marker() { echo "$STATE_DIR/failed-$(printf '%s' "$1" | tr -c 'A-Za-z0-9-' '_')"; }
+
+pick_mountpoint() { # name
+    local base="$MOUNT_ROOT/$1" mp i=1
+    mp="$base"
+    while [ -e "$mp" ]; do
+        if [ -d "$mp" ] && [ -z "$(ls -A "$mp" 2>/dev/null)" ] && ! mount | grep -qF " on $mp ("; then
+            break
+        fi
+        mp="$base $i"; i=$((i + 1))
+    done
+    echo "$mp"
+}
+
+# Mount one device read/write. $2 = "auto" when called from the daemon.
+do_mount() {
+    local dev="$1" mode="${2:-manual}" ntfs3g state name id mp opts uid gid out rc i
+
+    ntfs3g="$(find_ntfs3g)" || { log "ntfs-3g not found. Run: ntfsctl install-deps"; return 1; }
+    macfuse_version >/dev/null || { log "macFUSE not installed. Run: ntfsctl install-deps"; return 1; }
+
+    load_info "$dev" || { log "$dev: no such disk"; return 1; }
+    [ "$(info FilesystemType)" = ntfs ] || { log "$dev is not an NTFS volume"; return 1; }
+    name="$(volume_name "$dev")"
+    id="$(volume_id "$dev")"
+
+    state="$(volume_state "$dev")"
+    if [ "$state" = rw ]; then
+        log "$dev ($name) is already mounted read/write at $(volume_mountpoint "$dev")"
+        return 0
+    fi
+    if [ "$mode" = auto ] && [ -f "$(failed_marker "$id")" ]; then
+        return 0 # failed earlier this boot; don't loop on our own fallback mount
+    fi
+
+    if [ "$state" = ro ]; then
+        for i in 1 2 3 4 5; do
+            diskutil unmount "/dev/$dev" >/dev/null 2>&1 && break
+            sleep 1
+        done
+        if [ "$(volume_state "$dev")" != none ]; then
+            log "$dev ($name): could not unmount the read-only volume (in use?)"
+            [ "$mode" = auto ] && notify "\"$name\" is in use; could not switch it to read/write."
+            return 1
+        fi
+    fi
+
+    mkdir -p "$STATE_DIR"
+    mp="$(pick_mountpoint "$name")"
+    mkdir -p "$mp" || { log "cannot create $mp"; return 1; }
+
+    opts="$MOUNT_OPTIONS,volname=$name"
+    if uid="$(console_uid)"; then
+        gid="$(id -g "$uid" 2>/dev/null || echo 20)"
+        opts="$opts,uid=$uid,gid=$gid"
+    fi
+
+    out="$("$ntfs3g" "/dev/$dev" "$mp" -o "$opts" 2>&1)"; rc=$?
+    if [ $rc -eq 0 ]; then
+        echo "$mp" > "$STATE_DIR/$dev"
+        rm -f "$(failed_marker "$id")"
+        log "$dev ($name) mounted read/write at $mp"
+        [ "$mode" = auto ] && notify "\"$name\" is now writable."
+        [ "$OPEN_IN_FINDER" = yes ] && as_console_user /usr/bin/open "$mp" >/dev/null 2>&1
+        return 0
+    fi
+
+    rmdir "$mp" 2>/dev/null
+    : > "$(failed_marker "$id")"
+    log "$dev ($name): ntfs-3g failed (exit $rc): $(printf '%s' "$out" | tr '\n' ' ')"
+    local hint=""
+    if [ "$(id -u)" = 0 ] && ! have_fda; then
+        hint="macOS blocked access to the disk. Allow Full Disk Access for \"NTFS RW\" in System Settings -> Privacy & Security -> Full Disk Access."
+        open_fda_settings
+    else case "$out" in
+        *"is hibernated"*|*"refused to mount"*|*"unsafe state"*|*"Windows cache"*)
+            hint="Windows Fast Startup left this drive in use. Shut Windows down fully, or repair it on this Mac with: sudo ntfsctl repair $dev" ;;
+        *nclean*)
+            hint="The drive was not safely removed. Repair it with: sudo ntfsctl repair $dev" ;;
+        *"fuse"*|*"FUSE"*|*"load"*)
+            hint="macFUSE could not load. On Apple Silicon, allow the macFUSE system extension (see 'ntfsctl doctor')." ;;
+    esac; fi
+    [ -n "$hint" ] && log "hint: $hint"
+    if [ "$FALLBACK_READONLY" = yes ]; then
+        diskutil mount "/dev/$dev" >/dev/null 2>&1 && log "$dev ($name) remounted read-only"
+    fi
+    notify "Could not mount \"$name\" read/write.${hint:+ $hint}"
+    return 1
+}
+
+do_unmount() {
+    local dev="$1" mp
+    mp="$(volume_mountpoint "$dev")" || { log "$dev is not mounted"; rm -f "$STATE_DIR/$dev"; return 0; }
+    if diskutil unmount "$mp" >/dev/null 2>&1 || umount "$mp" 2>/dev/null; then
+        rm -f "$STATE_DIR/$dev"
+        case "$mp" in "$MOUNT_ROOT"/*) rmdir "$mp" 2>/dev/null ;; esac
+        log "$dev unmounted from $mp"
+        return 0
+    fi
+    log "$dev: could not unmount $mp (in use?). Try: sudo ntfsctl unmount --force $dev"
+    return 1
+}
+
+# -------------------------------------------------------------- commands ----
+
+cmd_list() {
+    local plain=0 dev name id size state mp auto
+    [ "${1:-}" = "--plain" ] && plain=1
+    load_config
+    [ $plain = 1 ] || printf '%-10s %-24s %-10s %-10s %-5s %s\n' DEVICE NAME SIZE STATE AUTO "ID / MOUNT POINT"
+    for dev in $(ntfs_devices); do
+        load_info "$dev"
+        name="$(info VolumeName)"; [ -n "$name" ] || name="(no name)"
+        id="$(volume_id "$dev")"
+        size="$(info TotalSize)"; [ -n "$size" ] || size="$(info Size)"
+        state="$(volume_state "$dev")"
+        mp="$(volume_mountpoint "$dev" || true)"
+        if is_excluded "$id"; then auto=no; else auto=yes; fi
+        if [ $plain = 1 ]; then
+            printf 'vol\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$dev" "$(printf '%s' "$name" | tr '\t' ' ')" "${size:-0}" "$state" "$mp" "$id" "$auto"
+        else
+            case "$state" in rw) state="read/write" ;; ro) state="read-only" ;; none) state="unmounted" ;; esac
+            printf '%-10s %-24s %-10s %-10s %-5s %s\n' "$dev" "$name" "$(human_size "$size")" "$state" "$auto" "$id"
+            [ -n "$mp" ] && printf '%-10s %s\n' "" "-> $mp"
+        fi
+    done
+}
+
+cmd_status() {
+    local plain=0 v ntfs3g key
+    [ "${1:-}" = "--plain" ] && plain=1
+    load_config
+    if [ $plain = 1 ]; then
+        printf 'meta\tversion\t%s\n' "$VERSION"
+        if v="$(macfuse_version)"; then printf 'dep\tmacfuse\tyes\t%s\n' "$v"; else printf 'dep\tmacfuse\tno\t\n'; fi
+        if ntfs3g="$(find_ntfs3g)"; then printf 'dep\tntfs3g\tyes\t%s\n' "$ntfs3g"; else printf 'dep\tntfs3g\tno\t\n'; fi
+        if daemon_loaded; then printf 'dep\tdaemon\tyes\t\n'; else printf 'dep\tdaemon\tno\t\n'; fi
+        printf 'dep\tfda\t%s\t\n' "$(helper_fda)"
+        for key in $CONFIG_KEYS; do eval "printf 'cfg\t%s\t%s\n' \"\$key\" \"\$$key\""; done
+        cmd_list --plain
+        return 0
+    fi
+    cmd_doctor
+    echo
+    cmd_list
+}
+
+cmd_doctor() {
+    local ok=1 v ntfs3g
+    load_config
+    echo "NTFS RW $VERSION (developed by Pamdai)  —  macOS $(sw_vers -productVersion) ($(uname -m))"
+    echo
+    if v="$(macfuse_version)"; then
+        echo "  [ok]   macFUSE $v"
+        if [ "$(uname -m)" = arm64 ]; then
+            if kmutil showloaded --list-only 2>/dev/null | grep -qi macfuse; then
+                echo "  [ok]   macFUSE kernel extension is loaded"
+            else
+                echo "  [info] macFUSE kernel extension is not loaded yet (it loads on first mount)."
+                echo "         If mounting fails on Apple Silicon you must allow it once:"
+                echo "           1. Shut down, hold the power button -> Options -> Startup Security Utility"
+                echo "           2. Choose 'Reduced Security' + 'Allow user management of kernel extensions'"
+                echo "           3. Restart, then System Settings -> Privacy & Security -> Allow 'Benjamin Fleischer'"
+                echo "           4. Restart again"
+            fi
+        fi
+    else
+        ok=0; echo "  [MISSING] macFUSE            -> run: ntfsctl install-deps"
+    fi
+    if ntfs3g="$(find_ntfs3g)"; then
+        echo "  [ok]   ntfs-3g at $ntfs3g"
+    else
+        ok=0; echo "  [MISSING] ntfs-3g            -> run: ntfsctl install-deps"
+    fi
+    if daemon_loaded; then
+        echo "  [ok]   auto-mount daemon is loaded"
+    elif [ -f "$DAEMON_PLIST" ]; then
+        ok=0; echo "  [WARN] auto-mount daemon is installed but not loaded -> run: sudo ntfsctl daemon start"
+    else
+        ok=0; echo "  [WARN] auto-mount daemon is not installed"
+    fi
+    case "$(helper_fda)" in
+        yes) echo "  [ok]   NTFS RW has Full Disk Access" ;;
+        no)  ok=0
+             echo "  [WARN] NTFS RW does NOT have Full Disk Access - macOS will block external disks."
+             echo "         System Settings -> Privacy & Security -> Full Disk Access -> turn on 'NTFS RW'"
+             echo "         (click + and pick /Applications/NTFS RW.app if it is not listed)" ;;
+        *)   echo "  [info] Full Disk Access not checked yet (checked when a drive is mounted)" ;;
+    esac
+    echo "  [cfg]  AUTO_MOUNT=$AUTO_MOUNT AUTO_MOUNT_INTERNAL=$AUTO_MOUNT_INTERNAL FALLBACK_READONLY=$FALLBACK_READONLY NOTIFY=$NOTIFY"
+    [ $ok = 1 ] && return 0 || return 1
+}
+
+cmd_mount() {
+    local dev rc=0
+    [ $# -ge 1 ] || die "usage: ntfsctl mount <diskXsY|all>"
+    require_root mount "$@"
+    load_config
+    if [ "$1" = all ]; then set -- $(ntfs_devices); fi
+    for dev in "$@"; do
+        dev="$(normalize_dev "$dev")"
+        if via_helper mount "$dev"; then
+            [ "$VIA_RC" = 0 ] || rc=1
+        else
+            do_mount "$dev" || rc=1
+        fi
+    done
+    return $rc
+}
+
+# Clear the Windows journal / Fast Startup state with ntfsfix, then mount read/write.
+cmd_repair() {
+    local dry=0 dev ntfsfix out rc i
+    [ "${1:-}" = "--dry-run" ] && { dry=1; shift; }
+    [ $# -eq 1 ] || die "usage: ntfsctl repair [--dry-run] <diskXsY>"
+    require_root repair "$@"
+    load_config
+    dev="$(normalize_dev "$1")"
+    if [ $dry = 1 ]; then via_helper repair-dry "$dev" && return "$VIA_RC"
+    else via_helper repair "$dev" && return "$VIA_RC"; fi
+    ntfsfix="$(find_ntfsfix)" || die "ntfsfix not found (it comes with ntfs-3g). Run: ntfsctl install-deps"
+    load_info "$dev" || die "$dev: no such disk"
+    [ "$(info FilesystemType)" = ntfs ] || die "$dev is not an NTFS volume"
+
+    if [ $dry = 1 ]; then
+        "$ntfsfix" -n "/dev/$dev"
+        return $?
+    fi
+
+    case "$(volume_state "$dev")" in
+        rw) do_unmount "$dev" || die "could not unmount $dev" ;;
+        ro) for i in 1 2 3 4 5; do diskutil unmount "/dev/$dev" >/dev/null 2>&1 && break; sleep 1; done ;;
+    esac
+    [ "$(volume_state "$dev")" = none ] || die "$dev is in use; close any apps using it and try again"
+
+    log "$dev: running ntfsfix -d"
+    out="$("$ntfsfix" -d "/dev/$dev" 2>&1)"; rc=$?
+    printf '%s\n' "$out" | while IFS= read -r line; do [ -n "$line" ] && log "  ntfsfix: $line"; done
+    if [ $rc -ne 0 ]; then
+        diskutil mount "/dev/$dev" >/dev/null 2>&1
+        die "ntfsfix could not repair $dev (exit $rc). The drive needs chkdsk on a Windows PC."
+    fi
+    rm -f "$(failed_marker "$(volume_id "$dev")")"
+    do_mount "$dev"
+}
+
+cmd_unmount() {
+    local force=0 dev rc=0
+    [ "${1:-}" = "--force" ] && { force=1; shift; }
+    [ $# -ge 1 ] || die "usage: ntfsctl unmount [--force] <diskXsY|all>"
+    require_root unmount "$@"
+    load_config
+    if [ "$1" = all ]; then set -- $(ntfs_devices); fi
+    for dev in "$@"; do
+        dev="$(normalize_dev "$dev")"
+        if [ $force = 1 ]; then
+            local mp; mp="$(volume_mountpoint "$dev")" && diskutil unmount force "$mp" >/dev/null 2>&1
+            rm -f "$STATE_DIR/$dev"
+        else
+            do_unmount "$dev" || rc=1
+        fi
+    done
+    return $rc
+}
+
+# Called by launchd whenever any filesystem is mounted (and at boot).
+cmd_automount() {
+    require_root automount
+    DAEMON_MODE=1
+    load_config
+    mkdir -p "$STATE_DIR"
+    if have_fda; then echo yes > "$STATE_DIR/fda"; else echo no > "$STATE_DIR/fda"; fi
+    process_queue
+    [ "$AUTO_MOUNT" = yes ] || exit 0
+    find_ntfs3g >/dev/null && macfuse_version >/dev/null || exit 0
+    local dev id
+    for dev in $(ntfs_devices); do
+        load_info "$dev"
+        id="$(volume_id "$dev")"
+        is_excluded "$id" && continue
+        [ "$AUTO_MOUNT_INTERNAL" = yes ] || [ "$(info Internal)" != true ] || continue
+        # Only convert volumes macOS mounted read-only; leave ejected/unmounted ones alone.
+        [ "$(volume_state "$dev")" = ro ] || continue
+        do_mount "$dev" auto
+    done
+    exit 0
+}
+
+cmd_auto() {
+    case "${1:-}" in
+        on|yes)  cmd_config set AUTO_MOUNT=yes; "$SELF" automount >/dev/null 2>&1 || true ;;
+        off|no)  cmd_config set AUTO_MOUNT=no ;;
+        "")      load_config; echo "AUTO_MOUNT=$AUTO_MOUNT" ;;
+        *)       die "usage: ntfsctl auto [on|off]" ;;
+    esac
+}
+
+cmd_exclude() {
+    local action="${1:-list}" target="${2:-}" id new item
+    load_config
+    case "$action" in
+        list) printf '%s\n' "$EXCLUDE" | tr ',' '\n' | sed '/^$/d'; return 0 ;;
+        add|remove) [ -n "$target" ] || die "usage: ntfsctl exclude $action <diskXsY|volume-id>" ;;
+        *) die "usage: ntfsctl exclude [list|add|remove] <diskXsY|volume-id>" ;;
+    esac
+    require_root exclude "$@"
+    if valid_dev "${target#/dev/}"; then
+        load_info "${target#/dev/}" || die "no such disk: $target"
+        id="$(volume_id "${target#/dev/}")"
+    else
+        id="$target"
+    fi
+    printf '%s' "$id" | grep -Eq '^[A-Za-z0-9-]+$' || die "invalid volume id: $id"
+    new=""
+    for item in $(printf '%s' "$EXCLUDE" | tr ',' ' '); do
+        [ "$item" = "$id" ] && continue
+        new="${new:+$new,}$item"
+    done
+    [ "$action" = add ] && new="${new:+$new,}$id"
+    EXCLUDE="$new"
+    write_config
+    log "exclude $action $id"
+}
+
+cmd_config() {
+    local sub="${1:-show}" kv key val
+    [ $# -gt 0 ] && shift
+    case "$sub" in
+        show)
+            load_config
+            for key in $CONFIG_KEYS; do eval "echo \"\$key=\\\"\$$key\\\"\""; done ;;
+        get)
+            load_config
+            is_config_key "${1:-}" || die "unknown key '${1:-}'. Keys: $CONFIG_KEYS"
+            eval "echo \"\$$1\"" ;;
+        set)
+            [ $# -ge 1 ] || die "usage: ntfsctl config set KEY=VALUE [KEY=VALUE ...]"
+            require_root config set "$@"
+            load_config
+            for kv in "$@"; do
+                key="${kv%%=*}"; val="${kv#*=}"
+                [ "$key" != "$kv" ] || die "expected KEY=VALUE, got '$kv'"
+                is_config_key "$key" || die "unknown key '$key'. Keys: $CONFIG_KEYS"
+                validate_value "$key" "$val"
+                eval "$key=\$val"
+            done
+            write_config
+            log "config updated: $*" ;;
+        reset)
+            require_root config reset
+            set_defaults; write_config; log "config reset to defaults" ;;
+        edit)
+            require_root config edit
+            "${EDITOR:-nano}" "$CONFIG_FILE" ;;
+        path) echo "$CONFIG_FILE" ;;
+        *) die "usage: ntfsctl config [show|get KEY|set KEY=VALUE...|reset|edit|path]" ;;
+    esac
+}
+
+cmd_daemon() {
+    case "${1:-status}" in
+        start)
+            require_root daemon start
+            launchctl bootstrap system "$DAEMON_PLIST" 2>/dev/null || launchctl kickstart -k "system/$LABEL"
+            launchctl enable "system/$LABEL" ;;
+        stop)
+            require_root daemon stop
+            launchctl bootout "system/$LABEL" 2>/dev/null || true ;;
+        restart)
+            require_root daemon restart
+            launchctl bootout "system/$LABEL" 2>/dev/null || true
+            launchctl bootstrap system "$DAEMON_PLIST" ;;
+        status)
+            if daemon_loaded; then echo "loaded"; else echo "not loaded"; return 1; fi ;;
+        *) die "usage: ntfsctl daemon [start|stop|restart|status]" ;;
+    esac
+}
+
+find_brew() {
+    local b
+    for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do [ -x "$b" ] && { echo "$b"; return 0; }; done
+    return 1
+}
+
+cmd_install_deps() {
+    [ "$(id -u)" != 0 ] || die "run 'ntfsctl install-deps' WITHOUT sudo (Homebrew refuses to run as root)."
+    local brew
+    brew="$(find_brew)" || {
+        echo "Homebrew is required to install macFUSE and ntfs-3g."
+        echo "Install it from https://brew.sh, then run 'ntfsctl install-deps' again."
+        exit 1
+    }
+    load_config
+    if macfuse_version >/dev/null; then
+        echo "==> macFUSE $(macfuse_version) already installed"
+    else
+        echo "==> Installing macFUSE (you will be asked for your password)"
+        "$brew" install --cask macfuse || die "macFUSE installation failed"
+    fi
+    if find_ntfs3g >/dev/null; then
+        echo "==> ntfs-3g already installed at $(find_ntfs3g)"
+    else
+        echo "==> Installing ntfs-3g (gromgit/fuse/ntfs-3g-mac)"
+        "$brew" tap gromgit/fuse || die "could not tap gromgit/fuse"
+        "$brew" install gromgit/fuse/ntfs-3g-mac || die "ntfs-3g installation failed"
+    fi
+    echo
+    cmd_doctor || true
+    echo
+    if [ "$(uname -m)" = arm64 ]; then
+        echo "Apple Silicon: if this is the first time macFUSE is installed, follow the"
+        echo "kernel-extension steps above, restart, then reconnect your NTFS drive."
+    else
+        echo "If prompted, allow the macFUSE extension in System Settings -> Privacy & Security."
+    fi
+}
+
+cmd_uninstall() {
+    require_root uninstall
+    if [ "${1:-}" != "--yes" ]; then
+        printf 'Remove NTFS RW (app, daemon, ntfsctl, config)? macFUSE and ntfs-3g are kept. [y/N] '
+        read -r ans; case "$ans" in y|Y|yes) ;; *) echo "Aborted."; exit 1 ;; esac
+    fi
+    launchctl bootout "system/$LABEL" 2>/dev/null || true
+    rm -f "$DAEMON_PLIST" /private/etc/newsyslog.d/ntfsrw.conf
+    rm -rf "$APP_PATH" "$SUPPORT_DIR" "$STATE_DIR"
+    rm -f "$LOG_FILE"*
+    pkgutil --forget "$PKG_ID" >/dev/null 2>&1 || true
+    rm -f "$SELF"
+    echo "NTFS RW has been removed. Volumes already mounted stay mounted until ejected."
+    echo "To also remove the dependencies: brew uninstall ntfs-3g-mac && brew uninstall --cask macfuse"
+}
+
+cmd_log() {
+    [ -f "$LOG_FILE" ] || { echo "No log yet ($LOG_FILE)"; return 0; }
+    if [ "${1:-}" = "-f" ]; then tail -n 50 -f "$LOG_FILE"; else tail -n "${1:-50}" "$LOG_FILE"; fi
+}
+
+usage() {
+    cat <<EOF
+ntfsctl $VERSION — read/write NTFS drives on macOS (macFUSE + ntfs-3g)
+Developed by Pamdai
+
+Usage: ntfsctl <command> [args]
+
+Everyday
+  status                 Dependency check + list of NTFS volumes
+  list                   List NTFS volumes, their state and volume IDs
+  mount <diskXsY|all>    Mount a volume read/write                    (sudo)
+  unmount [--force] <diskXsY|all>                                     (sudo)
+  auto [on|off]          Toggle automatic read/write mounting         (sudo)
+  exclude [list|add|remove] <diskXsY|id>  Never auto-mount a volume   (sudo)
+  repair [--dry-run] <diskXsY>  Clear Windows Fast Startup / unclean state
+                         with ntfsfix, then mount read/write          (sudo)
+
+Setup
+  install-deps           Install macFUSE + ntfs-3g with Homebrew (no sudo)
+  doctor                 Diagnose the installation
+  config [show|get K|set K=V ...|reset|edit|path]                     (sudo to change)
+  daemon [start|stop|restart|status]                                  (sudo)
+  log [-f|N]             Show the log ($LOG_FILE)
+  uninstall [--yes]      Remove NTFS RW                               (sudo)
+  version
+
+Config keys: $CONFIG_KEYS
+EOF
+}
+
+# ------------------------------------------------------------------ main ----
+
+cmd="${1:-help}"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+    status)        cmd_status "$@" ;;
+    list|ls)       cmd_list "$@" ;;
+    mount)         cmd_mount "$@" ;;
+    unmount|umount|eject) cmd_unmount "$@" ;;
+    repair|fix)    cmd_repair "$@" ;;
+    automount)     cmd_automount ;;
+    auto)          cmd_auto "$@" ;;
+    exclude)       cmd_exclude "$@" ;;
+    config)        cmd_config "$@" ;;
+    daemon)        cmd_daemon "$@" ;;
+    doctor)        cmd_doctor ;;
+    install-deps)  cmd_install_deps ;;
+    log|logs)      cmd_log "$@" ;;
+    uninstall)     cmd_uninstall "$@" ;;
+    version|--version|-v) echo "NTFS RW $VERSION — developed by Pamdai" ;;
+    help|--help|-h) usage ;;
+    *) usage >&2; exit 1 ;;
+esac

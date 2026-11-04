@@ -1,0 +1,21 @@
+#!/bin/bash
+TARGET="${3:-/}"; [ "$TARGET" = "/" ] && TARGET=""
+LABEL="com.ntfsrw.automount"
+SUPPORT="$TARGET/Library/Application Support/NTFSRW"
+PLIST="$TARGET/Library/LaunchDaemons/$LABEL.plist"
+
+# Keep the user's existing settings on upgrade.
+if [ ! -f "$SUPPORT/ntfsrw.conf" ]; then
+    cp "$SUPPORT/ntfsrw.conf.default" "$SUPPORT/ntfsrw.conf"
+fi
+chown -R root:wheel "$SUPPORT" "$PLIST" "$TARGET/usr/local/bin/ntfsctl"
+chmod 644 "$SUPPORT/ntfsrw.conf" "$PLIST"
+mkdir -p "$SUPPORT/queue" && chmod 700 "$SUPPORT/queue"
+chmod 755 "$TARGET/usr/local/bin/ntfsctl"
+touch "$TARGET/var/log/ntfsrw.log" && chmod 644 "$TARGET/var/log/ntfsrw.log"
+
+if [ -z "$TARGET" ]; then
+    launchctl enable "system/$LABEL" 2>/dev/null
+    launchctl bootstrap system "$PLIST" 2>/dev/null || launchctl kickstart -k "system/$LABEL"
+fi
+exit 0

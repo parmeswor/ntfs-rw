@@ -1,0 +1,9 @@
+# Build intermediates
+build/
+
+# Only the current release is kept in the repo
+dist/*
+!dist/NTFS-RW-1.1.0.pkg
+!dist/NTFS-RW-1.1.0.zip
+
+.DS_Store

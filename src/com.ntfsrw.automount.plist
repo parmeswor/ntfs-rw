@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.ntfsrw.automount</string>
+	<!-- NTFS RW.app in helper mode runs "ntfsctl automount" as its child, so the
+	     Full Disk Access granted to "NTFS RW" applies (needed for raw disk access). -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Applications/NTFS RW.app/Contents/MacOS/NTFSRW</string>
+		<string>--helper</string>
+		<string>automount</string>
+	</array>
+	<!-- Runs every time any filesystem is mounted, so NTFS volumes that macOS
+	     mounts read-only are immediately remounted read/write. -->
+	<key>StartOnMount</key>
+	<true/>
+	<!-- Mount/repair requests from the app and "sudo ntfsctl" are queued here. -->
+	<key>QueueDirectories</key>
+	<array>
+		<string>/Library/Application Support/NTFSRW/queue</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>3</integer>
+	<key>StandardOutPath</key>
+	<string>/var/log/ntfsrw.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/ntfsrw.log</string>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>com.ntfsrw.app</string>
+	</array>
+</dict>
+</plist>
