@@ -97,7 +97,7 @@ for tool in ntfs-3g ntfsfix; do
     install -m 755 "$NTFS3G_DIST/$tool" "$SUPPORT/bin/$tool"
     sign "$SUPPORT/bin/$tool" "com.ntfsrw.$tool"
 done
-otool -L "$SUPPORT/bin/ntfs-3g" | tail -n +2 | grep -vE '^[[:space:]]+(/usr/lib/|/System/|/usr/local/lib/libfuse\.2\.dylib)' \
+otool -L "$SUPPORT/bin/ntfs-3g" | grep -E '^[[:space:]]' | grep -vE '^[[:space:]]+(/usr/lib/|/System/|/usr/local/lib/libfuse\.2\.dylib)' \
     && die "ntfs-3g links against a library that won't exist on users' Macs" || true
 install -m 644 "$NTFS3G_TARBALL" "$SUPPORT/licenses/"
 tar -xzOf "$NTFS3G_TARBALL" "ntfs-3g-$NTFS3G_VERSION/COPYING" > "$SUPPORT/licenses/ntfs-3g-COPYING.txt"
@@ -159,7 +159,8 @@ step "Building component package"
 xattr -cr "$PAYLOAD" 2>/dev/null || true
 pkgbuild --analyze --root "$PAYLOAD" "$BUILD/component.plist" >/dev/null
 # Always install the app to /Applications, never "relocate" to another copy.
-/usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" "$BUILD/component.plist"
+/usr/libexec/PlistBuddy -c "Add :0:BundleIsRelocatable bool false" "$BUILD/component.plist" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" "$BUILD/component.plist"
 pkgbuild --quiet --root "$PAYLOAD" \
     --component-plist "$BUILD/component.plist" \
     --scripts "$ROOT_DIR/pkg/scripts" \

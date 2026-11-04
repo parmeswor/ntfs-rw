@@ -12,8 +12,10 @@
 #
 set -euo pipefail
 
-TARBALL="$1"
-OUT="$2"
+# Absolute paths: the build steps below run from inside the source tree.
+TARBALL="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+mkdir -p "$2"
+OUT="$(cd "$2" && pwd)"
 MIN_MACOS="13.0"
 WORK="$(dirname "$OUT")/ntfs-3g-build"
 
@@ -33,15 +35,25 @@ for arch in arm64 x86_64; do
     (
         cd "$src"
         export LIBTOOLIZE=glibtoolize
-        autoreconf -fi >/dev/null 2>&1
+        # configure.ac references libgcrypt's macro even though we build with
+        # --disable-crypto (where it is never called). Stub it instead of
+        # requiring libgcrypt on the build Mac.
+        mkdir -p m4
+        cat > m4/ntfsrw-gcrypt-stub.m4 <<'M4'
+dnl NTFS RW: crypto is disabled; AM_PATH_LIBGCRYPT just runs "not found".
+AC_DEFUN([AM_PATH_LIBGCRYPT], [$3])
+M4
+        autoreconf --verbose --install --force > "$WORK/autoreconf-$arch.log" 2>&1 \
+            || { echo "autoreconf failed:" >&2; grep -iE 'error|not found|required|warning' "$WORK/autoreconf-$arch.log" | tail -25 >&2; exit 1; }
         export CC="clang -arch $arch -mmacosx-version-min=$MIN_MACOS"
         export CFLAGS="-O2"
         export FUSE_MODULE_CFLAGS="-I/usr/local/include/fuse -D_FILE_OFFSET_BITS=64 -D_DARWIN_USE_64_BIT_INODE"
         export FUSE_MODULE_LIBS="-L/usr/local/lib -lfuse"
         # Keep Homebrew's libraries (gettext, gcrypt, ...) out of the build.
         export PKG_CONFIG_LIBDIR=/nonexistent
+        # --prefix only ends up in the (unused) plugin path; it must not contain spaces.
         ./configure --host="$arch-apple-darwin" \
-            --prefix="/Library/Application Support/NTFSRW" \
+            --prefix=/usr/local/ntfsrw \
             --with-fuse=external --disable-shared --enable-static \
             --disable-ldconfig --disable-mtab --disable-crypto --disable-nls \
             --disable-dependency-tracking --without-uuid --without-hd \
